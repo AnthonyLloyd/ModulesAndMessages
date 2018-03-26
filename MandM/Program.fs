@@ -1,7 +1,46 @@
 ﻿
 
+type UUID = int
+type User = {id:UUID; email:string; loyaltyPoints:int}
 
+module LoyaltyPoints =
 
+    type Saga =
+        private
+        | AddPoints of userId: UUID * pointsToAdd: int
+
+    type Update =
+        | StartSaga of Saga
+        | UserFound of Saga * User
+        | UserNotFound of Saga
+        | UserUpdated of Saga * User
+        | EmailSent of Saga
+        
+    type Model = unit
+
+    type Command =
+        | FindUser of Saga * userId: UUID
+        | UpdateUser of Saga * user: User
+        | SendEmail of Saga * email: string * subject: string * body: string
+        | ReturnAddPoints of Saga * string option
+
+    let update update model : Model * Command list =
+        match update with
+        | StartSaga (AddPoints (userId,_) as saga) ->
+            model, [FindUser (saga,userId)]
+        | UserFound (AddPoints(_,pointsToAdd) as saga,user) ->
+            let updated = {user with loyaltyPoints = user.loyaltyPoints + pointsToAdd}
+            model, [UpdateUser (saga,updated)]
+        | UserNotFound saga ->
+            model, [ReturnAddPoints (saga, Some "User not found")]
+        | UserUpdated (saga,user) ->
+            model, [SendEmail(saga, user.email, "Points added!",
+                        sprintf "You now have %i" user.loyaltyPoints)]
+        | EmailSent saga ->
+            model, [ReturnAddPoints (saga, None)]
+
+    // let addPoints (userId:UUID) (pointsToAdd:int) (model:Model) =
+    //     update (StartSaga (AddPoints (userId,pointsToAdd)))
 
 
 // case class User(id: UUID, email: String, loyaltyPoints: Int)
