@@ -1,47 +1,48 @@
-﻿
+﻿open System
+
+type Reply<'a>(f : 'a -> unit) =
+    member __.Reply(value) = f value
+
+module Reply =
+    let map f (r:Reply<'a>) =
+        Reply(f >> r.Reply)
+
+type IModule<'messageIn,'messageOut> =
+    abstract member Post : 'messageIn -> unit
+    abstract member PostAndReply : (Reply<'b> -> 'messageIn) -> 'b
+    abstract Deliver : IObservable<'messageOut>
+
+type Module<'messageIn,'messageOut> = {
+    Update: ('messageOut -> unit) -> 'messageIn -> unit
+}
+
+module Module =
+    let x = 1
 
 type UUID = int
 type User = {id:UUID; email:string; loyaltyPoints:int}
 
 module LoyaltyPoints =
 
-    type Saga =
-        private
-        | AddPoints of userId: UUID * pointsToAdd: int
+    type MessageIn =
+        | AddPoints of userId: UUID * pointsToAdd: int * Reply<string option>
 
-    type Update =
-        | StartSaga of Saga
-        | UserFound of Saga * User
-        | UserNotFound of Saga
-        | UserUpdated of Saga * User
-        | EmailSent of Saga
-        
-    type Model = unit
-
-    type Command =
-        | FindUser of Saga * userId: UUID
-        | UpdateUser of Saga * user: User
-        | SendEmail of Saga * email: string * subject: string * body: string
-        | ReturnAddPoints of Saga * string option
-
-    let update update model : Model * Command list =
+    type MessageOut =
+        | FindUser of userId: UUID * Reply<User option>
+        | UpdateUser of user: User
+        | SendEmail of email: string * subject: string * body: string
+    let update (command:MessageOut -> unit) (update:MessageIn) =
         match update with
-        | StartSaga (AddPoints (userId,_) as saga) ->
-            model, [FindUser (saga,userId)]
-        | UserFound (AddPoints(_,pointsToAdd) as saga,user) ->
-            let updated = {user with loyaltyPoints = user.loyaltyPoints + pointsToAdd}
-            model, [UpdateUser (saga,updated)]
-        | UserNotFound saga ->
-            model, [ReturnAddPoints (saga, Some "User not found")]
-        | UserUpdated (saga,user) ->
-            model, [SendEmail(saga, user.email, "Points added!",
-                        sprintf "You now have %i" user.loyaltyPoints)]
-        | EmailSent saga ->
-            model, [ReturnAddPoints (saga, None)]
-
-    // let addPoints (userId:UUID) (pointsToAdd:int) (model:Model) =
-    //     update (StartSaga (AddPoints (userId,pointsToAdd)))
-
+        | AddPoints (userId,pointsToAdd,reply) ->
+            FindUser (userId,
+                reply |> Reply.map (function
+                | None -> Some "User not found"
+                | Some user ->
+                    let updated = { user with loyaltyPoints = user.loyaltyPoints + pointsToAdd }
+                    UpdateUser updated |> command
+                    SendEmail(user.email, "Points added!", sprintf "You now have %i" updated.loyaltyPoints) |> command
+                    None)
+            ) |> command
 
 // case class User(id: UUID, email: String, loyaltyPoints: Int)
 
