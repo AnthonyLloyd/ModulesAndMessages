@@ -1,48 +1,75 @@
-﻿open System
-
-type Reply<'a>(f : 'a -> unit) =
-    member __.Reply(value) = f value
-
-module Reply =
-    let map f (r:Reply<'a>) =
-        Reply(f >> r.Reply)
-
-type IModule<'messageIn,'messageOut> =
-    abstract member Post : 'messageIn -> unit
-    abstract member PostAndReply : (Reply<'b> -> 'messageIn) -> 'b
-    abstract Deliver : IObservable<'messageOut>
-
-type Module<'messageIn,'messageOut> = {
-    Update: ('messageOut -> unit) -> 'messageIn -> unit
-}
-
-module Module =
-    let x = 1
-
+﻿
 type UUID = int
 type User = {id:UUID; email:string; loyaltyPoints:int}
 
 module LoyaltyPoints =
 
-    type MessageIn =
-        | AddPoints of userId: UUID * pointsToAdd: int * Reply<string option>
+    type IContext =
+        abstract member FindUser : UUID -> Async<User option>
+        abstract member UpdateUser : User -> Async<unit>
+        abstract member SendEmail : email:string * subject:string * body:string -> Async<unit>
 
-    type MessageOut =
-        | FindUser of userId: UUID * Reply<User option>
-        | UpdateUser of user: User
-        | SendEmail of email: string * subject: string * body: string
-    let update (command:MessageOut -> unit) (update:MessageIn) =
-        match update with
-        | AddPoints (userId,pointsToAdd,reply) ->
-            FindUser (userId,
-                reply |> Reply.map (function
-                | None -> Some "User not found"
-                | Some user ->
-                    let updated = { user with loyaltyPoints = user.loyaltyPoints + pointsToAdd }
-                    UpdateUser updated |> command
-                    SendEmail(user.email, "Points added!", sprintf "You now have %i" updated.loyaltyPoints) |> command
-                    None)
-            ) |> command
+    let addPoints (context:IContext) userId pointsToAdd = async {
+        let! u = context.FindUser userId
+        match u with
+        | None -> return Some "User not found"
+        | Some user ->
+            let updated = { user with loyaltyPoints = user.loyaltyPoints + pointsToAdd }
+            do! context.UpdateUser updated
+            do! context.SendEmail(user.email, "Points added!", "You now have " + string updated.loyaltyPoints)
+            return None
+    }
+
+module LoyaltyPointsFree =
+
+    type Command<'a> =
+        | FindUser of UUID * (User option->'a)
+        | UpdateUser of User * (unit->'a)
+        | SendEmail of email:string * subject:string * body:string * (unit->'a)
+
+    type Program<'a> =
+        | Pure of 'a
+        | Free of Command<Program<'a>>
+
+    let rec inline private bind f = function
+        | Pure x -> f x
+        | Free (FindUser (x, next)) -> FindUser (x, next >> bind f) |> Free
+        | Free (UpdateUser (x, next)) -> UpdateUser (x, next >> bind f) |> Free
+        | Free (SendEmail (x,y,z, next)) -> SendEmail (x,y,z, next >> bind f) |> Free
+
+    let inline private findUser uuid = FindUser (uuid, Pure) |> Free
+    let inline private updateUser user = UpdateUser (user, Pure) |> Free
+    let inline private sendEmail x y z = SendEmail (x,y,z, Pure) |> Free
+
+    type private ProgramBuilder() =
+        member inline __.Bind (x, f) = bind f x
+        member inline __.Return x = Pure x
+        member inline __.ReturnFrom x = x
+        member inline __.Zero () = Pure ()
+
+    let private program = ProgramBuilder()
+
+    let addPoints userId pointsToAdd =
+        program {
+            let! u = findUser userId
+            match u with
+            | None -> return Some "User not found"
+            | Some user ->
+                let updated = { user with loyaltyPoints = user.loyaltyPoints + pointsToAdd }
+                do! updateUser updated
+                do! sendEmail user.email "Points added!" ("You now have " + string updated.loyaltyPoints)
+                return None
+        }
+
+module Test =
+
+    open LoyaltyPointsFree
+
+    let rec interpret = function
+        | Pure x -> x
+        | Free (FindUser (x, next)) -> Some {id=x; email="a@b.c"; loyaltyPoints=0} |> next |> interpret
+        | Free (UpdateUser (x, next)) -> () |> next |> interpret
+        | Free (SendEmail (_,_,_, next)) -> () |> next |> interpret
 
 // case class User(id: UUID, email: String, loyaltyPoints: Int)
 
