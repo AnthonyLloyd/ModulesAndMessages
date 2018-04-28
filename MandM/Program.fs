@@ -22,44 +22,47 @@ module LoyaltyPoints =
 
 module LoyaltyPointsFree =
 
-    type Command<'a> =
-        | FindUser of UUID * (User option->'a)
-        | UpdateUser of User * (unit->'a)
-        | SendEmail of email:string * subject:string * body:string * (unit->'a)
+    module Outgoing =
 
-    type Program<'a> =
-        | Pure of 'a
-        | Free of Command<Program<'a>>
+        type Message<'a> =
+            | FindUser of UUID * (User option->'a)
+            | UpdateUser of User * (unit->'a)
+            | SendEmail of email:string * subject:string * body:string * (unit->'a)
 
-    let inline private findUser uuid = FindUser (uuid, Pure) |> Free
-    let inline private updateUser user = UpdateUser (user, Pure) |> Free
-    let inline private sendEmail x y z = SendEmail (x,y,z, Pure) |> Free
+        type Batch<'a> =
+            | Pure of 'a
+            | Free of Message<Batch<'a>>
 
-    let inline private map f = function
-        | FindUser (x, next) -> FindUser (x, next >> f)
-        | UpdateUser (x, next) -> UpdateUser (x, next >> f)
-        | SendEmail (x,y,z, next) -> SendEmail (x,y,z, next >> f)
+        let inline findUser uuid = FindUser (uuid, Pure) |> Free
+        let inline updateUser user = UpdateUser (user, Pure) |> Free
+        let inline sendEmail x y z = SendEmail (x,y,z, Pure) |> Free
 
-    let rec inline private bind f = function
-        | Pure x -> f x
-        | Free x -> map (bind f) x |> Free
+        let inline map f = function
+            | FindUser (x, next) -> FindUser (x, next >> f)
+            | UpdateUser (x, next) -> UpdateUser (x, next >> f)
+            | SendEmail (x,y,z, next) -> SendEmail (x,y,z, next >> f)
 
-    type private ProgramBuilder() =
-        member inline __.Bind (x, f) = bind f x
-        member inline __.Return x = Pure x
-        member inline __.ReturnFrom x = x
-        member inline __.Zero () = Pure ()
+        let rec inline bind f = function
+            | Pure x -> f x
+            | Free x -> map (bind f) x |> Free
 
-    let private program = ProgramBuilder()
+        type BatchBuilder() =
+            member inline __.Bind (x, f) = bind f x
+            member inline __.Return x = Pure x
+            member inline __.ReturnFrom x = x
+            member inline __.Zero () = Pure ()
 
-    let addPoints userId pointsToAdd = program {
-        let! u = findUser userId
+        let command = BatchBuilder()
+
+
+    let addPoints userId pointsToAdd = Outgoing.command {
+        let! u = Outgoing.findUser userId
         match u with
         | None -> return Some "User not found"
         | Some user ->
             let updated = { user with loyaltyPoints = user.loyaltyPoints + pointsToAdd }
-            do! updateUser updated
-            do! sendEmail user.email "Points added!" ("You now have " + string updated.loyaltyPoints)
+            do! Outgoing.updateUser updated
+            do! Outgoing.sendEmail user.email "Points added!" ("You now have " + string updated.loyaltyPoints)
             return None
     }
 
@@ -87,7 +90,6 @@ module Message =
         return v
     }
 
-
     let postAndReply (f : ('Reply -> unit) -> 'Message) postBox =
         wait (f >> postBox)
 
@@ -96,11 +98,34 @@ module Message =
 
 module MessageWork =
     
-    type Message =
-        | DoSomething of int * (string -> unit)
-        | DoSomething2 of string * (int -> unit)
+    type Message<'a> =
+        | DoSomething of int * (string -> 'a)
+        | DoSomething2 of string * (int -> 'a)
 
-    let postbox (_:Message) = ()
+    type MessageBatch<'a> =
+        | Pure of 'a
+        | Free of Message<MessageBatch<'a>>
+
+    let inline private doSomething i = DoSomething (i, Pure) |> Free
+    let inline private doSomething2 s = DoSomething2 (s, Pure) |> Free
+
+    let inline private map f = function
+        | DoSomething (x, next) -> DoSomething (x, next >> f)
+        | DoSomething2 (x, next) -> DoSomething2 (x, next >> f)
+
+    let rec inline private bind f = function
+        | Pure x -> f x
+        | Free x -> map (bind f) x |> Free
+
+    type private MessageBatchBuilder() =
+        member inline __.Bind (x, f) = bind f x
+        member inline __.Return x = Pure x
+        member inline __.ReturnFrom x = x
+        member inline __.Zero () = Pure ()
+
+    let private messageBatch = MessageBatchBuilder()
+
+    let postbox (_:MessageBatch<'a>) = ()
 
 module Test =
 
