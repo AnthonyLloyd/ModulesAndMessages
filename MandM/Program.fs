@@ -52,10 +52,39 @@ module LoyaltyPointsFree =
             member inline __.ReturnFrom x = x
             member inline __.Zero () = Pure ()
 
-        let command = BatchBuilder()
+        let batch = BatchBuilder()
+
+    module Incoming =
+
+        type Message<'a> =
+            | AddPoints of UUID * int * (string option -> 'a)
+            | GetPoints of UUID * (int option -> 'a)
+
+        type Batch<'a> =
+            | Pure of 'a
+            | Free of Message<Batch<'a>>
+
+        let inline addPoints u i = AddPoints (u,i, Pure) |> Free
+        let inline getPoints u = GetPoints (u, Pure) |> Free
+
+        let inline map f = function
+            | AddPoints (u,i, next) -> AddPoints (u,i, next >> f)
+            | GetPoints (u, next) -> GetPoints (u, next >> f)
+
+        let rec inline bind f = function
+            | Pure x -> f x
+            | Free x -> map (bind f) x |> Free
+
+        type BatchBuilder() =
+            member inline __.Bind (x, f) = bind f x
+            member inline __.Return x = Pure x
+            member inline __.ReturnFrom x = x
+            member inline __.Zero () = Pure ()
+
+        let private batch = BatchBuilder()
 
 
-    let addPoints userId pointsToAdd = Outgoing.command {
+    let addPoints userId pointsToAdd = Outgoing.batch {
         let! u = Outgoing.findUser userId
         match u with
         | None -> return Some "User not found"
@@ -66,84 +95,75 @@ module LoyaltyPointsFree =
             return None
     }
 
-module Message =
-    open System.Threading
-
-    let wait (f : ('a -> unit) -> unit) =
-        use mre = new ManualResetEventSlim(false)
-        let mutable v = Unchecked.defaultof<_>
-        let reply a =
-            v <- a
-            mre.Set()
-        f reply
-        mre.Wait()
-        v
-
-    let waitAsync (f : ('a -> unit) -> unit) = async {
-        use mre = new ManualResetEventSlim(false)
-        let mutable v = Unchecked.defaultof<_>
-        let reply a =
-            v <- a
-            mre.Set()
-        f reply
-        let! _ = Async.AwaitWaitHandle mre.WaitHandle
-        return v
+    let getPoints userId = Outgoing.batch {
+        let! u = Outgoing.findUser userId
+        return u |> Option.map (fun u -> u.loyaltyPoints)
     }
 
-    let postAndReply (f : ('Reply -> unit) -> 'Message) postBox =
-        wait (f >> postBox)
-
-    let postAndAsyncReply (f : ('Reply -> unit) -> 'Message) postBox =
-        waitAsync (f >> postBox)
-
-module MessageWork =
-    
-    type Message<'a> =
-        | DoSomething of int * (string -> 'a)
-        | DoSomething2 of string * (int -> 'a)
-
-    type MessageBatch<'a> =
-        | Pure of 'a
-        | Free of Message<MessageBatch<'a>>
-
-    let inline private doSomething i = DoSomething (i, Pure) |> Free
-    let inline private doSomething2 s = DoSomething2 (s, Pure) |> Free
-
-    let inline private map f = function
-        | DoSomething (x, next) -> DoSomething (x, next >> f)
-        | DoSomething2 (x, next) -> DoSomething2 (x, next >> f)
-
-    let rec inline private bind f = function
-        | Pure x -> f x
-        | Free x -> map (bind f) x |> Free
-
-    type private MessageBatchBuilder() =
-        member inline __.Bind (x, f) = bind f x
-        member inline __.Return x = Pure x
-        member inline __.ReturnFrom x = x
-        member inline __.Zero () = Pure ()
-
-    let private messageBatch = MessageBatchBuilder()
-
-    let postbox (_:MessageBatch<'a>) = ()
-
-module Test =
-
-    open LoyaltyPointsFree
-    open MessageWork
-
+    let outgoingInterpreter (b:Outgoing.Batch<'a>) : 'a =
+        failwith "hi"
 
     let run = function
-        | FindUser (x, next) -> Some {id=x; email="a@b.c"; loyaltyPoints=0} |> next
-        | UpdateUser (_, next) -> () |> next
-        | SendEmail (_,_,_, next) -> () |> next
+        | Incoming.AddPoints (u,i, next) -> addPoints u i |> outgoingInterpreter |> next
+        | Incoming.GetPoints (u, next) -> getPoints u |> outgoingInterpreter |> next
 
-    let rec interpret p =
-        match p with
-        | Pure x -> x
-        | Free x -> run x |> interpret
+    let rec private incomingInterpret (batch:Incoming.Batch<'b>) =
+        match batch with
+        | Incoming.Pure x -> x
+        | Incoming.Free x -> run x |> incomingInterpret
 
-    let tester = postbox |> Message.postAndReply (fun reply -> DoSomething (10, reply))
+    let post (batch:Incoming.Batch<'b>) =
+        incomingInterpret batch
+
+
+// module Message =
+//     open System.Threading
+
+//     let wait (f : ('a -> unit) -> unit) =
+//         use mre = new ManualResetEventSlim(false)
+//         let mutable v = Unchecked.defaultof<_>
+//         let reply a =
+//             v <- a
+//             mre.Set()
+//         f reply
+//         mre.Wait()
+//         v
+
+//     let waitAsync (f : ('a -> unit) -> unit) = async {
+//         use mre = new ManualResetEventSlim(false)
+//         let mutable v = Unchecked.defaultof<_>
+//         let reply a =
+//             v <- a
+//             mre.Set()
+//         f reply
+//         let! _ = Async.AwaitWaitHandle mre.WaitHandle
+//         return v
+//     }
+
+//     let postAndReply (f : ('Reply -> unit) -> 'Message) postBox =
+//         wait (f >> postBox)
+
+//     let postAndAsyncReply (f : ('Reply -> unit) -> 'Message) postBox =
+//         waitAsync (f >> postBox)
+
+
+// module Test =
+
+//     open LoyaltyPointsFree
+//     open MessageWork
+
+
+//     let run = function
+//         | FindUser (x, next) -> Some {id=x; email="a@b.c"; loyaltyPoints=0} |> next
+//         | UpdateUser (_, next) -> () |> next
+//         | SendEmail (_,_,_, next) -> () |> next
+
+//     let rec interpret p =
+//         match p with
+//         | Pure x -> x
+//         | Free x -> run x |> interpret
+
+//     let tester = postbox |> Message.postAndReply (fun reply -> DoSomething (10, reply))
 
 
 [<EntryPoint>]
